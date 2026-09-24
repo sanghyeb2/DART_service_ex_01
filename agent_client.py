@@ -1,209 +1,25 @@
-"""
-agent_client.py
-
-공통 Agent 실행 모듈
-
-Resume Agent
-JD Agent
-Matching Agent
-
-모든 Agent는 이 클래스를 이용하여 실행한다.
-"""
+"""Studio API 통신의 유일한 진입점. 실제 연결은 후속 Phase 3에서 구현한다."""
 
 import json
-import time
 
-from openai import OpenAI
-
-from config import (
-    UPSTAGE_API_KEY
-)
-
-##################################################
-# OpenAI Client
-##################################################
-
-client = OpenAI(
-    api_key=UPSTAGE_API_KEY,
-    base_url="https://api.upstage.ai/v2"
-)
+from config import Settings
 
 
-##################################################
-# Agent Client
-##################################################
+class AgentError(RuntimeError):
+    """화면에 표시할 수 있는 Agent 설정/호출 오류."""
 
-class AgentClient:
-    """
-    Studio Agent 실행 클래스
-    """
 
-    def __init__(
-        self,
-        agent_id: str,
-        config_id: str = "1"
-    ):
+def run_agent(agent_id: str, input_text: str) -> dict:
+    settings = Settings.from_env()
+    required = {'UPSTAGE_API_KEY': settings.upstage_api_key,
+                'Agent ID': agent_id, 'UPSTAGE_AGENT_API_URL': settings.upstage_agent_api_url}
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        raise AgentError('Agent 설정이 필요합니다: ' + ', '.join(missing)
+                         + '. 로컬 테스트는 USE_MOCK=true로 실행해주세요.')
+    # 미확인 API 형식을 추측해 요청하지 않는다. 연결은 이 함수 내부에서만 추가한다.
+    raise AgentError('실제 Studio API 연결은 Phase 3에서 구현합니다. USE_MOCK=true로 실행해주세요.')
 
-        self.agent_id = agent_id
-        self.config_id = config_id
 
-    ##################################################
-    # Job 생성
-    ##################################################
-
-    def create_job(
-        self,
-        file_id: str
-    ) -> str:
-
-        input_data = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_file",
-                        "file_id": file_id
-                    }
-                ]
-            }
-        ]
-
-        response = client.responses.create(
-
-            model=self.agent_id,
-
-            include=["last"],
-
-            input=input_data,
-
-            extra_body={
-                "config_id": self.config_id
-            }
-
-        )
-
-        return response.id
-
-    ##################################################
-    # Polling
-    ##################################################
-
-    def wait_until_complete(
-        self,
-        job_id: str,
-        interval: int = 2
-    ):
-
-        response = client.responses.retrieve(
-
-            job_id,
-
-            include=["last"]
-
-        )
-
-        print(f"Status : {response.status}")
-
-        while response.status in (
-            "queued",
-            "in_progress"
-        ):
-
-            time.sleep(interval)
-
-            response = client.responses.retrieve(
-
-                job_id,
-
-                include=["last"]
-
-            )
-
-            print(f"Status : {response.status}")
-
-        if response.status == "failed":
-
-            raise RuntimeError(
-                "Studio Agent 실행 실패"
-            )
-
-        if response.status != "completed":
-
-            raise RuntimeError(
-                f"Unknown Status : {response.status}"
-            )
-
-        print("Job Complete")
-
-        return response
-
-    ##################################################
-    # Result Parsing
-    ##################################################
-
-    def parse_result(
-        self,
-        response
-    ):
-
-        if not response.output_text:
-
-            raise ValueError(
-                "output_text가 존재하지 않습니다."
-            )
-
-        try:
-
-            result = json.loads(
-                response.output_text
-            )
-
-        except json.JSONDecodeError:
-
-            raise ValueError(
-                "output_text가 JSON 형식이 아닙니다."
-            )
-
-        return result
-
-    ##################################################
-    # Agent 실행
-    ##################################################
-
-    def run(
-        self,
-        file_id: str
-    ):
-
-        print("-" * 60)
-        print("Create Job")
-        print("-" * 60)
-
-        job_id = self.create_job(
-            file_id
-        )
-
-        print(f"Job ID : {job_id}")
-        print()
-
-        print("-" * 60)
-        print("Waiting...")
-        print("-" * 60)
-
-        response = self.wait_until_complete(
-            job_id
-        )
-
-        print()
-
-        print("-" * 60)
-        print("Parse Result")
-        print("-" * 60)
-
-        result = self.parse_result(
-            response
-        )
-
-        print("JSON Parsing Complete")
-
-        return result
+def run_agent_with_json(agent_id: str, payload: dict) -> dict:
+    return run_agent(agent_id, json.dumps(payload, ensure_ascii=False, allow_nan=False))

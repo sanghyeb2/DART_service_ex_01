@@ -1,800 +1,210 @@
-# Project 1. HR AI Service
+# DART Insight
 
-Resume와 Job Description(JD)을 분석하여 지원자의 직무 적합도를 평가하는 AI 서비스입니다.
+**기업 공시 기반 취업·이직 정보 분석 서비스**
 
-본 프로젝트는 **Upstage Studio Agent API**를 이용하여 문서를 분석하고,
-Resume와 JD를 비교하여 최종 적합도와 추천 사항을 JSON 형태로 생성합니다.
+DART 반기보고서에서 취업 준비에 필요한 기업 정보를 추출·분석하는 AI 기업분석 서비스다. 주요 사업, 제품·서비스, 시장환경, 연구개발, 투자, 인력 현황을 구조화하고 기업 전략·산업 동향·기술 방향과 취업 인사이트를 제공하는 것을 목표로 한다.
 
----
+> 현재는 **PDF 전처리와 Mock Agent 워크플로를 검증한 기초 구현 단계**다. Business/Tech 결과는 업로드 내용과 무관한 가상 예시이고, Insight는 두 JSON을 템플릿으로 종합한다. 실제 LLM 호출·공시 Fact 추출은 아직 연결되지 않았다. `USE_MOCK=false`나 API 키 입력만으로 실제 분석이 시작되지는 않는다.
 
-# Project Overview
+## 1. 서비스 목적과 사용자
 
-본 프로젝트는 다음과 같은 AI Workflow로 구성됩니다.
+공시 보고서를 직접 읽고 정보를 정리하는 시간을 줄이고, 기업과 직무를 이해하는 데 필요한 근거를 제공한다.
 
-```text
-Resume.pdf
-      │
-      ▼
-Resume Agent
-      │
-      ▼
-resume.json
+- **취업준비생:** 지원 기업의 사업과 산업·기술 동향을 파악하고 자기소개서와 면접을 준비한다.
+- **이직준비생:** 대상 기업의 사업 방향, 경영·인력 현황을 살펴보고 자신의 직무 경험과 연결할 정보를 찾는다.
+- **주요 활용:** 지원 기업 탐색, 직무 이해, 자기소개서 작성, 면접 준비, 이직 대상 기업 조사.
 
-JobDescription.pdf
-      │
-      ▼
-JD Agent
-      │
-      ▼
-jd.json
+취업 인사이트는 공시 Fact에 근거한 직무·기술 관련성 설명이다. 실제 채용 여부나 미래 실적을 단정하지 않는다.
 
-resume.json + jd.json
-      │
-      ▼
-Matching Builder
-      │
-      ▼
-Matching_Input.pdf
-      │
-      ▼
-Matching Agent
-      │
-      ▼
-matching_result.json
+## 2. 확정 기획 범위
+
+### 1차 MVP
+
+1. 사용자가 DART에서 내려받은 **반기보고서 PDF 한 개**를 Streamlit에 업로드한다.
+2. Python·PyMuPDF로 페이지별 텍스트를 추출하고 원본 페이지 번호를 보존한다.
+3. 사업·시장·연구개발·투자·생산·인력 관련 핵심 페이지를 선별해 두 Extract Agent 입력을 만든다.
+4. **Business Extract Agent와 Tech & Investment Extract Agent가 병렬 분석**하고 각각 정의된 JSON Schema에 맞춰 결과를 구조화한다.
+5. **Insight Agent는 두 Extract 결과 JSON을 종합**해 기업 전략, 산업 동향, 기술·투자 방향, 관련 직무·기술 키워드와 면접 활용 포인트를 생성한다.
+6. 결과를 JSON으로 저장하고 Streamlit Dashboard에서 확인한다.
+
+### 향후 제품화
+
+- 기업명·기업 고유번호를 기준으로 **OpenDART API에서 보고서를 자동 탐색·수집**한다.
+- 동일 기업의 당해·전년도 반기보고서를 같은 Schema로 분석한다.
+- **Change Analysis**로 사업, 연구개발, 투자, 인력 등 주요 지표의 변화와 방향을 비교한다.
+
+자동 수집과 전년도 비교는 현재 MVP에 구현되지 않은 후속 범위다. 1차 MVP의 입력은 사용자 업로드 PDF이며, 현재 Insight Agent에 비교 역할을 섞지 않는다.
+
+## 3. 데이터 흐름과 Agent 역할
+
+```mermaid
+flowchart TD
+    A[반기보고서 PDF 업로드] --> B[PyMuPDF 페이지별 텍스트 추출]
+    B --> C[핵심 페이지 선별 · 원본 페이지 번호 보존]
+    C --> D[Business Extract Agent]
+    C --> E[Tech & Investment Extract Agent]
+    D --> F[Business JSON]
+    E --> G[Tech & Investment JSON]
+    F --> H[Insight Agent]
+    G --> H
+    H --> I[Insight JSON]
+    F --> J[JSON 저장 · Streamlit Dashboard]
+    G --> J
+    I --> J
 ```
 
----
+두 Extract 호출은 `ThreadPoolExecutor(max_workers=2)`로 병렬 실행한다. PDF 처리와 화면 갱신은 주 스레드에서 수행하고, 두 추출이 모두 성공해야 Insight를 실행한다. 어느 Agent든 실패하면 해당 실행의 결과 파일을 저장하지 않는다.
 
-# Project Structure
+| Agent | 입력 | 담당 내용 | 출력 모델 |
+|---|---|---|---|
+| Business Extract | 사업·시장 관련 페이지 텍스트 | 기업 개요, 사업·제품·서비스, 시장환경·전망, 경쟁 요인, 판매 전략, 위험 | `BusinessResult` |
+| Tech & Investment Extract | 기술·연구개발·투자·생산·직원 관련 페이지 텍스트 | 연구개발, 설비투자, 생산, 신사업, 인력 현황, 확인 가능한 재무 수치 | `TechResult` |
+| Insight | 위 두 결과 JSON | 기업 전략, 산업·기술·투자 방향, 관련 직무·기술 영역, 취업 키워드, 면접 포인트 | `InsightResult` |
 
-```text
-hr-ai-service-workflow/
-│
-├── app.py
-├── streamlit_app.py
-├── service.py
-├── config.py
-├── upload.py
-├── agent_client.py
-├── resume_agent.py
-├── jd_agent.py
-├── matching_agent.py
-├── matching_builder.py
-├── file_manager.py
-├── requirements.txt
-├── README.md
-├── .gitignore
-├── .env
-│
-├── fonts/
-│     └── NanumGothic-Regular.ttf
-│
-├── data/
-│     ├── Resume.pdf
-│     └── JobDescription.pdf
-│
-├── output/
-│     ├── resume.json
-│     ├── jd.json
-│     └── Matching_Input.pdf
-│
-└── result/
-      └── matching_result.json
-```
-
-## Project Structure Description
-
-| 경로 | 파일/폴더 | 설명 |
-|------|-----------|------|
-| `streamlit_app.py` | Streamlit UI | Resume와 Job Description을 업로드하고 AI 분석을 실행하는 웹 사용자 인터페이스입니다. 사용자의 입력을 받아 `service.py`를 호출하고 분석 결과를 화면에 출력합니다. |
-| `service.py` | Business Service | Streamlit UI와 기존 CLI 애플리케이션 사이의 서비스 계층입니다. Resume 분석 → JD 분석 → Matching PDF 생성 → Matching 분석을 하나의 서비스로 제공합니다. |
-| `app.py` | Main Application | 프로젝트 전체 Workflow를 실행하는 Orchestrator입니다. Resume 분석 → JD 분석 → Matching PDF 생성 → Matching 분석을 순차적으로 수행합니다. |
-| `config.py` | Configuration | API Key, Agent ID, Config ID, 프로젝트 경로(Path) 등 환경 설정 정보를 관리합니다. |
-| `upload.py` | File Upload | Resume, Job Description, Matching PDF를 Upstage Files API로 업로드하는 기능을 제공합니다. |
-| `agent_client.py` | Common Agent Client | Studio Agent를 공통 방식으로 호출하는 클래스입니다. Agent Job 생성, Polling, 결과(JSON) 파싱 기능을 제공합니다. |
-| `resume_agent.py` | Resume Agent | Resume Agent를 호출하여 이력서를 분석하고 Resume JSON을 생성합니다. |
-| `jd_agent.py` | JD Agent | Job Description Agent를 호출하여 채용 공고를 분석하고 JD JSON을 생성합니다. |
-| `matching_agent.py` | Matching Agent | Matching Agent를 호출하여 Resume와 Job Description의 적합도를 분석하고 최종 Matching Result를 생성합니다. |
-| `matching_builder.py` | PDF Builder | Resume JSON과 JD JSON을 하나의 PDF(`Matching_Input.pdf`)로 생성합니다. |
-| `file_manager.py` | File Manager | JSON 저장, 파일 읽기/쓰기 등 프로젝트의 공통 파일 입출력을 담당하는 유틸리티입니다. |
-| `requirements.txt` | Dependencies | 프로젝트 실행에 필요한 Python 패키지 목록입니다. |
-| `.env` | Environment Variables | Upstage API Key, Agent ID, Config ID 등 민감한 환경 변수를 저장합니다. GitHub에는 업로드하지 않습니다. |
-| `.gitignore` | Git Ignore | Git에서 제외할 파일과 폴더를 정의합니다. (`.env`, `__pycache__`, `output`, `result` 등) |
-| `README.md` | Project Guide | 프로젝트 소개, 실행 방법, GitHub 관리, Railway 배포 방법 등을 설명하는 프로젝트 문서입니다. |
-| `fonts/` | Font Resources | ReportLab에서 사용하는 한글 폰트(Nanum Gothic)를 저장하는 폴더입니다. |
-| `data/` | Input Documents | 분석 대상 Resume와 Job Description 파일을 저장하는 폴더입니다. |
-| `output/` | Intermediate Results | Resume 분석 결과, JD 분석 결과, Matching_Input.pdf 등 중간 산출물을 저장합니다. |
-| `result/` | Final Result | Matching Agent가 생성한 최종 적합도 분석 결과(JSON)를 저장합니다. |
-
-# Studio Agent Description
-
-본 프로젝트는 **Upstage Studio**에서 생성한 3개의 Agent를 사용하여 Resume 분석, Job Description 분석, 그리고 지원자와 채용 공고 간의 적합도 분석을 수행합니다.
-
-각 Agent는 하나의 역할(Role)만 담당하며, 분석 결과는 다음 Agent의 입력으로 활용됩니다.
-
----
-
----
-
-## Resume Agent
-
-Resume Agent는 지원자의 이력서를 분석하여 구조화된 JSON 형태의 정보를 생성합니다.
-
-### Input
-
-```text
-Resume.pdf
-```
-
-### Output
-
-```text
-resume.json
-```
-
-### 주요 역할
-
-- 개인정보 추출
-- 자기소개 요약
-- 보유 기술(Skills) 추출
-- 경력 정보 추출
-- 프로젝트 경험 추출
-- 학력 정보 추출
-- 자격증 정보 추출
-- 핵심 역량(Core Competencies) 추출
-
-### 생성 결과 예시
+Insight 입력 계약은 다음과 같다. 원문 전체를 다시 전달하지 않는다.
 
 ```json
-{
-    "name": "...",
-    "skills": [],
-    "career": [],
-    "projects": []
-}
+{"business": {}, "technology_and_investment": {}}
 ```
 
----
+정확한 필드·타입·중첩 구조의 기준은 [schemas.py](schemas.py)다.
 
-## JD Agent
+- **Business:** `company_name`, `report_period`, `business_summary`, `business_segments`, `major_products`(제품·서비스), `market_conditions`, `market_outlook`, `competitive_factors`, `sales_strategy`, `major_risks`.
+- **Tech & Investment:** `revenue`, `operating_profit`, `rd_expense`, `rd_focus`, `rd_projects`, `major_investments`, `production_status`, `new_business`, `employee_count`, `employee_summary`, `technology_keywords`.
+- **Insight:** `industry_trends`, `company_strategy`, `technology_focus`, `investment_direction`, `growth_signals`, `risk_signals`, `job_insights`, `job_keywords`, `interview_points`, `summary`.
 
-JD(Job Description) Agent는 채용 공고를 분석하여 기업이 요구하는 기술과 자격 요건을 JSON 형태로 생성합니다.
+`job_insights`는 `{job_area, reason, keywords, evidence}` 항목의 목록이며, `evidence`는 `{fact, source_page}` 목록이다. 수치가 없으면 `null`, 문자열은 `""`, 목록은 `[]`를 사용한다. 금액은 단위를 보존한 문자열을 권장한다. Pydantic으로 잘못된 타입·추가 필드·비정상 페이지 번호를 거부한다. **형식 검증은 사실 정확도 검증을 대신하지 않는다.**
 
-### Input
+## 4. 현재 구현 상태
 
-```text
-JobDescription.pdf
+| 기획 항목 | 상태 | 확인 내용 |
+|---|---|---|
+| PDF 업로드·페이지별 텍스트 추출 | 구현 | PyMuPDF, 한글 텍스트, 원본 페이지 번호 |
+| 핵심 영역 선별 | 구현 | 책갈피 → 페이지 상단 장/절 제목 → 키워드·앞뒤 1페이지 순으로 보완 |
+| 두 Extract의 병렬 실행 | 구현 | 독립 입력으로 동시 실행, 완료 후 Insight 진행 |
+| Extract의 실제 AI Fact 추출 | **미구현** | 고정 Mock JSON, 실제 Studio 통신 없음 |
+| 두 JSON 기반 Insight | Mock 구현 | 입력 계약·스키마 검증·템플릿 종합, 실제 LLM 종합은 미연결 |
+| JSON 저장·대시보드 | 구현 | 입력 TXT 2개, 결과 JSON 3개, 5개 탭 |
+| 원문·근거 확인 | 기초 구현 | 실제 PDF 페이지 조회, 일부 구조화 항목의 `source_page` 표시 |
+| Studio 업로드용 PDF 생성 | 보조 기능 구현 | 원문 배치를 유지한 두 PDF와 원본 페이지 대응표 |
+| OpenDART 자동 수집·전년도 비교 | 향후 확장 | 현재 미구현 |
+
+**판정:** 기초 워크플로는 갖춰져 있지만 실제 AI 분석을 수행하는 1차 MVP는 아직 완성되지 않았다. 실제 통신과 원문 대비 추출 정확도 검증이 남아 있다. 기획 대조 및 수정 결과는 [점검 보고서](docs/plan-alignment-report.md)에 기록한다.
+
+## 5. 실행 방법
+
+Python **3.11 이상**과 PowerShell 기준이다. 프로젝트 루트에서 실행한다.
+
+```powershell
+# 가상환경이 없는 경우에만 생성
+py -3.11 -m venv .venv
+
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+
+# 기존 .env를 덮어쓰지 않는다.
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
+
+$env:USE_MOCK = "true"
+.\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-### Output
+1. 브라우저에서 반기보고서 PDF를 업로드한다. 동작 확인용 파일은 `data/sample_report.pdf`다.
+2. **기업 분석하기**를 누른다.
+3. 기업 개요 / 산업 동향 / 기술 & 투자 / 취업 인사이트 / 근거·원문 탭을 확인한다.
+4. `output/`에 저장된 JSON과 입력 TXT를 확인한다.
 
-```text
-jd.json
-```
+Mock 경고가 표시되는 동안 기업 분석 결과는 가상 예시다. 근거 탭의 Mock Fact·Page도 업로드 기업의 근거가 아니다. 같은 탭의 실제 원문 영역에서 업로드한 PDF의 페이지 텍스트를 별도로 확인할 수 있다.
 
-### 주요 역할
+### 환경변수
 
-- 회사 정보 추출
-- 모집 직무 분석
-- 주요 업무 추출
-- 필수 기술(Required Skills) 추출
-- 우대 기술(Preferred Skills) 추출
-- 자격 요건 분석
-- 경력 요구사항 분석
-- 학력 요구사항 분석
+| 이름 | 용도 |
+|---|---|
+| `USE_MOCK` | 기본 `true`. 현재 실행 가능한 분석 모드는 Mock |
+| `UPSTAGE_API_KEY` | 후속 실제 Studio 연결용 인증 설정 |
+| `BUSINESS_AGENT_ID`, `TECH_AGENT_ID`, `INSIGHT_AGENT_ID` | 각 원격 Agent 식별 설정 |
+| `UPSTAGE_AGENT_API_URL` | 실제 통신 구현 시 확인할 endpoint 설정 |
+| `DART_API_KEY`, `*_CONFIG_ID` | `.env.example`의 후속 단계용 예시. 현재 코드에서 읽거나 사용하지 않음 |
 
-### 생성 결과 예시
+환경변수는 `.env`보다 우선한다. 실제 키는 소스나 Git에 넣지 않는다. 현재 `agent_client.py`는 설정 누락 또는 실제 연결 미구현을 안내하며, API 실패를 Mock 성공으로 바꾸지 않는다.
 
-```json
-{
-    "company": "...",
-    "position": "...",
-    "required_skills": [],
-    "preferred_skills": []
-}
-```
+## 6. 전처리와 결과 저장
 
----
+- **원천 데이터:** 사용자가 올린 DART 반기보고서 PDF.
+- **전처리 데이터:** 페이지별 추출 텍스트와 물리적 페이지 번호.
+- **Agent 입력:** Business용·Tech & Investment용 핵심 텍스트. 공통 회사 소개 등은 중복 포함될 수 있다.
+- **분석 결과:** 검증된 세 결과 JSON과 Streamlit Dashboard.
 
-## Matching Agent
+텍스트에는 `===== PAGE N =====` 마커를 붙인다. N은 **PDF 파일의 1부터 시작하는 원본 페이지 번호**이며, 보고서 하단에 인쇄된 쪽수와 다를 수 있다.
 
-Matching Agent는 Resume와 JD를 비교하여 지원자의 직무 적합도를 분석합니다.
-
-Matching Agent는 Resume JSON과 JD JSON을 기반으로 생성된 **Matching_Input.pdf**를 입력으로 사용합니다.
-
-### Input
-
-```text
-Matching_Input.pdf
-```
-
-### Output
-
-```text
-matching_result.json
-```
-
-### 주요 역할
-
-- Resume와 JD 비교
-- 기술 스택 일치 여부 분석
-- 경력 일치 여부 분석
-- 부족한 기술 분석
-- 장점 분석
-- 약점 분석
-- 개선 사항 추천
-- 최종 적합도(Score) 산출
-
-### 생성 결과 예시
-
-```json
-{
-    "match_level": "High Match",
-    "overall_score": 85,
-    "matched_skills": [],
-    "missing_skills": [],
-    "recommendations": []
-}
-```
-
----
-
-# Agent Responsibility
-
-| Agent | Input | Output | 주요 역할 |
-|--------|-------|--------|-----------|
-| **Resume Agent** | Resume.pdf | resume.json | 이력서 분석 및 지원자 정보 추출 |
-| **JD Agent** | JobDescription.pdf | jd.json | 채용 공고 분석 및 요구사항 추출 |
-| **Matching Agent** | Matching_Input.pdf | matching_result.json | Resume와 JD를 비교하여 직무 적합도 분석 |
-
----
----
-
-# Workflow
-
-## Step 1. Resume Analysis
-
-Resume.pdf를 Studio Resume Agent로 분석하여
-
-```text
-Resume.pdf
-
-↓
-
-Resume Agent
-
-↓
-
-resume.json
-```
-
-을 생성합니다.
-
----
-
-## Step 2. Job Description Analysis
-
-JobDescription.pdf를 Studio JD Agent로 분석하여
-
-```text
-JobDescription.pdf
-
-↓
-
-JD Agent
-
-↓
-
-jd.json
-```
-
-을 생성합니다.
-
----
-
-## Step 3. Matching Builder
-
-Resume JSON과 JD JSON을 하나의 문서로 변환합니다.
-
-```text
-resume.json
-
-+
-
-jd.json
-
-↓
-
-Matching_Input.pdf
-```
-
-Matching Agent는 이 PDF를 입력으로 사용합니다.
-
----
-
-## Step 4. Matching Analysis
-
-Matching_Input.pdf를 Studio Matching Agent로 분석합니다.
-
-```text
-Matching_Input.pdf
-
-↓
-
-Matching Agent
-
-↓
-
-matching_result.json
-```
-
-최종적으로 지원자의 적합도와 추천 사항을 생성합니다.
-
----
-
-# Output
-
-프로젝트가 완료되면 다음 파일이 생성됩니다.
+Business에는 회사 소개와 사업의 내용 장을, Tech에는 관련 연구개발·설비 절, 요약재무정보, 직원 현황 등을 선별한다. 장/절을 식별하지 못하면 키워드와 앞뒤 1페이지를 사용하고 경고한다. 범주별 입력 길이는 최대 **120,000자**이며 초과분은 제외하고 경고한다. 이 값은 문자 수 제한이며 모델 토큰 한도가 아니다.
 
 ```text
 output/
-
-resume.json
-
-jd.json
-
-Matching_Input.pdf
-
-
-result/
-
-matching_result.json
+├── business_input.txt
+├── tech_input.txt
+├── business_result.json
+├── tech_result.json
+└── insight_result.json
 ```
 
----
+UTF-8로 저장하며 최신 성공 실행으로 덮어쓴다. Agent 실패 시 저장하지 않고, 파일 교체 중 일반적인 I/O 오류가 발생하면 이미 교체한 파일을 복원한다. 단일 사용자 로컬 실행을 전제로 하며 다중 사용자 동시 저장이나 강제 종료 시 복구를 보장하지 않는다.
 
-# Matching Result
+### Studio Agent 준비용 보조 기능
 
-최종 결과는 다음과 같은 JSON 구조입니다.
+업로드 후 **Studio용 PDF 만들기**를 누르면 Agent 호출 없이 다음 파일을 생성·다운로드한다. 기존 보조 기능이며 실제 분석 완료를 의미하지 않는다.
 
-```json
-{
-  "match_level": "High Match",
-  "overall_score": 85,
-  "summary": "...",
-  "matched_skills": [],
-  "missing_skills": [],
-  "matched_experience": [],
-  "missing_requirements": [],
-  "strengths": [],
-  "weaknesses": [],
-  "recommendations": []
-}
+- `business_input.pdf`, `tech_input.pdf`: 선별 페이지의 원문 표와 배치를 보존한다.
+- `manifest.json`: 원본 파일명·SHA-256·선별 방법·원본 페이지 대응표·경고를 담는다.
+
+`output/studio_inputs/report-<id>/`에 실행별로 저장한다. PDF 상단 `SOURCE PDF PAGE N`의 N을 근거 페이지로 사용한다. 새 파일의 `FILE PAGE`와 구분한다. PDF 출력에는 120,000자 제한을 적용하지 않지만 선별에서 제외된 페이지는 포함되지 않는다.
+
+```powershell
+.\.venv\Scripts\python.exe preprocessor.py "data/sample_report.pdf"
 ```
 
----
+`--output-dir`로 저장 상위 경로를 지정할 수 있다. 프롬프트와 연결 준비 절차는 [Agent 설정 안내](agent_configs/README.md)를 참고한다.
 
-# Prerequisites
-
-- Python 3.11+
-- Upstage Studio
-- Upstage API Key
-
----
-
-# Installation
-
-패키지를 설치합니다.
-
-```bash
-pip install -r requirements.txt
-```
-
----
-
-# Environment Variables
-
-`.env`
+## 7. 프로젝트 구조
 
 ```text
-UPSTAGE_API_KEY=
-
-RESUME_AGENT_ID=
-RESUME_CONFIG_ID=1
-
-JD_AGENT_ID=
-JD_CONFIG_ID=1
-
-MATCHING_AGENT_ID=
-MATCHING_CONFIG_ID=1
+app.py                  # Streamlit UI, 병렬 Extract → Insight, 결과 저장
+preprocessor.py         # PDF 추출·페이지 선별·Studio PDF 내보내기
+business_agent.py       # Business Mock / 원격 호출 Wrapper
+tech_agent.py           # Tech & Investment Mock / 원격 호출 Wrapper
+insight_agent.py        # 두 JSON 기반 Mock 종합 / 원격 호출 Wrapper
+agent_client.py         # 실제 Studio 통신 연결 지점 (현재 미구현)
+schemas.py              # 세 결과의 Pydantic JSON 계약
+config.py               # 환경변수·입력 길이 설정
+agent_configs/README.md # 프롬프트 초안·출력 규칙·연결 안내
+tests/                  # 전처리·Agent·워크플로·Streamlit 테스트
+data/sample_report.pdf  # 가상 기업 테스트 샘플
+docs/                   # 구현 이력·기획 대조 보고
 ```
 
----
+의존성은 Streamlit, PyMuPDF, python-dotenv, Pydantic, Requests다. Requests는 후속 통신용이며 현재 외부 요청은 수행하지 않는다.
 
-# Run
+## 8. 검증과 남은 완료 조건
 
-프로젝트를 실행합니다.
-
-```bash
-python app.py
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
----
+자동 테스트는 실제 PDF 추출, 페이지 선별·길이 제한, Schema 검증, 두 Extract의 동시 실행, Insight 입력 계약, 실패 시 저장 방지·복원, 업로드 교체·오류·재시도·5개 탭을 확인한다. Streamlit AppTest에서는 파일 업로드 객체를 대체한다. 실제 API 응답과 추출 정확도는 검증하지 않는다.
 
-# Execution Flow
+실제 AI 연동(Phase 3)과 MVP 완료를 위해 남은 작업:
 
-실행 순서는 다음과 같습니다.
+- [ ] 사용하는 Studio의 endpoint·인증·요청/응답 사양과 세 Agent 설정을 확정한다.
+- [ ] `agent_client.py`에 실제 호출, 타임아웃, HTTP 오류, JSON 응답 처리를 구현한다.
+- [ ] Business·Tech가 업로드 문서의 실제 Fact를 추출하고 Insight가 그 근거로 종합하는지 검증한다.
+- [ ] 기업명, 보고기간, 숫자·단위, 원본 페이지, 핵심 영역의 누락과 인사이트 근거를 원문과 대조한다.
+- [ ] 실제 Agent 응답으로 Dashboard와 JSON 저장까지 종단간 검증한다.
 
-```text
-Configuration
+현재의 주요 한계:
 
-↓
+- 스캔 전용 PDF의 OCR은 지원하지 않는다. 일부 이미지·표 내용도 텍스트 추출 과정에서 빠지거나 배열이 달라질 수 있다.
+- 선별 규칙은 보고서 형식에 따라 누락이 생길 수 있다. 120,000자 초과 시 후반부 정보가 제외된다.
+- 페이지가 선별되지 않은 범주는 빈 텍스트가 된다. Mock은 이 경우에도 데모 데이터를 반환하므로 추출 성공으로 해석하지 않는다.
+- 일부 문자열·단일 수치 필드에는 개별 출처 필드가 없다. 현재 근거 표시는 출처가 있는 구조화 항목 중심이며 전체 Fact 추적을 보장하지 않는다.
+- 실제 Agent의 근거 충실도, 분석 품질, 호출 시간·비용은 아직 평가하지 않았다.
 
-Resume Analysis
-
-↓
-
-JD Analysis
-
-↓
-
-Matching Builder
-
-↓
-
-Matching Analysis
-
-↓
-
-Project Complete
-```
-
-# Streamlit Application Guide
-
-이번 프로젝트는 **Streamlit**을 이용하여 AI Resume Matching 서비스를 웹 애플리케이션 형태로 제공합니다.
-
-사용자는 브라우저에서 Resume와 Job Description을 업로드하고, AI 분석 결과를 실시간으로 확인할 수 있습니다.
-
-
-# Streamlit Project Structure
-
-```text
-streamlit_app.py
-
-↓
-
-Upload Files
-
-↓
-
-Call service.py
-
-↓
-
-Display Result
-```
-
-Streamlit은 사용자 인터페이스(UI)만 담당하며, 실제 비즈니스 로직은 `service.py`에서 수행합니다.
-
----
-
-# Streamlit Execution
-
-프로젝트 루트 디렉터리에서 다음 명령으로 실행합니다.
-
-```bash
-streamlit run streamlit_app.py
-```
-
-실행 후 브라우저에서 다음과 같은 주소로 접속할 수 있습니다.
-
-```text
-Local URL
-
-http://localhost:8501
-```
-
----
-
-# Streamlit User Interface
-
-애플리케이션은 다음과 같은 화면으로 구성됩니다.
-
-```text
-AI Resume Matching Service
-
-──────────────────────────────
-
-Resume Upload
-
-[ Choose File ]
-
-──────────────────────────────
-
-Job Description Upload
-
-[ Choose File ]
-
-──────────────────────────────
-
-[ Analyze ]
-
-──────────────────────────────
-
-Matching Result
-```
-
----
-
-# Streamlit Processing Flow
-
-사용자가 **Analyze** 버튼을 클릭하면 다음과 같은 순서로 분석이 수행됩니다.
-
-```text
-Resume Upload
-
-↓
-
-Save File
-
-↓
-
-Resume Analysis
-
-↓
-
-Resume JSON
-
-↓
-
-JD Upload
-
-↓
-
-Save File
-
-↓
-
-JD Analysis
-
-↓
-
-JD JSON
-
-↓
-
-Matching PDF 생성
-
-↓
-
-Matching Analysis
-
-↓
-
-Matching Result
-
-↓
-
-Result Display
-```
-
-# Railway Deployment Guide
-
-이번 프로젝트는 **Railway**를 이용하여 GitHub Repository를 배포하고, 인터넷에서 접속 가능한 AI 서비스를 구축합니다.
-
----
-
-# Railway Deployment Workflow
-
-Railway에서 GitHub Repository를 연결하면 **자동으로 첫 번째 Build와 Deploy가 시작됩니다.**
-
-실제 Railway의 배포 흐름은 다음과 같습니다.
-
-```text
-GitHub Repository
-
-↓
-
-Repository 연결
-
-↓
-
-자동 Build & Deploy 시작
-
-↓
-
-(첫 번째 Deploy 실패 가능)
-
-↓
-
-Build Log 확인
-
-↓
-
-Environment Variables 등록
-
-↓
-
-Custom Start Command 설정
-
-↓
-
-Redeploy
-
-↓
-
-Running
-
-↓
-
-Public Domain 생성
-
-↓
-
-서비스 확인
-```
-
----
-
-# Automatic Deploy
-
-## Railway의 기본 동작
-
-Railway는 Repository를 연결하는 즉시 첫 번째 Build와 Deploy를 자동으로 수행합니다.
-
-> **참고**
->
-> GitHub Repository를 연결하면 Railway는 자동으로 첫 번째 Build와 Deploy를 시작합니다.
->
-> 아직 Environment Variables 또는 Start Command가 설정되지 않은 경우에는 첫 번째 Deploy가 실패할 수 있습니다.
->
-> 이는 Railway의 정상적인 동작입니다.
-
----
-
-# Build Log 이해하기
-
-Railway는 Build 과정에서 다음과 같은 작업을 수행합니다.
-
-```text
-Detected Python
-
-↓
-
-Create Virtual Environment
-
-↓
-
-pip install
-
-↓
-
-Copy Project
-
-↓
-
-Starting Container
-
-↓
-
-Streamlit Started
-```
-
-각 단계의 의미는 다음과 같습니다.
-
-| 로그 | 설명 |
-|------|------|
-| **Detected Python** | Python 프로젝트를 자동으로 인식합니다. |
-| **Create Virtual Environment** | Python 가상환경을 생성합니다. |
-| **pip install** | requirements.txt의 패키지를 설치합니다. |
-| **Copy Project** | 프로젝트 파일을 컨테이너로 복사합니다. |
-| **Starting Container** | 컨테이너를 시작합니다. |
-| **Streamlit Started** | Streamlit 애플리케이션이 정상적으로 실행되었습니다. |
-
----
-
-# Environment Variables
-
-프로젝트에서 사용하는 API Key와 Agent ID는 GitHub에 포함하지 않고 Railway Variables로 관리합니다.
-
-```text
-Local
-
-.env
-
-↓
-
-Railway Variables
-```
-
-등록해야 하는 변수는 다음과 같습니다.
-
-```text
-UPSTAGE_API_KEY
-
-RESUME_AGENT_ID
-
-RESUME_CONFIG_ID
-
-JD_AGENT_ID
-
-JD_CONFIG_ID
-
-MATCHING_AGENT_ID
-
-MATCHING_CONFIG_ID
-```
-
-Variables를 저장한 후에는 반드시 **Redeploy**를 수행해야 합니다.
-
----
-
-# Custom Start Command
-
-Streamlit 애플리케이션은 **Custom Start Command**에서 실행해야 합니다.
-
-```bash
-streamlit run streamlit_app.py --server.port=$PORT --server.address=0.0.0.0
-```
-
-# Public Domain
-
-Deploy가 완료되었다고 해서 바로 접속 가능한 것은 아닙니다.
-
-Railway에서는 Public Domain을 생성해야 합니다.
-
-```text
-Deploy Success
-
-↓
-
-Networking
-
-↓
-
-Generate Domain
-
-↓
-
-Public URL 생성
-```
-
-예시
-
-```text
-https://hr-ai-service.up.railway.app
-```
-
-생성된 Public URL을 브라우저에서 열어 서비스를 확인합니다.
-
-
-
----
-
-# Learning Objectives
-
-이 프로젝트를 통해 다음 내용을 학습합니다.
-
-- Upstage Studio Agent API 사용 방법
-- File Upload API 활용
-- Resume 분석 자동화
-- Job Description 분석 자동화
-- PDF 생성(ReportLab)
-- AI Agent Workflow 설계
-- Parse → Classify → Extract 구조 이해
-- JSON 기반 AI 서비스 개발
-- Streamlit을 이용한 웹 애플리케이션 개발
-- Railway를 이용한 AI 서비스 배포
-
----
-
-# Technologies
-
-- Python
-- Upstage Studio Agent API
-- OpenAI SDK
-- ReportLab
-- JSON
-- Streamlit
-- Railway
-- GitHub
+OpenDART 자동 수집과 Change Analysis는 위 실제 AI MVP 검증 이후의 제품화 단계로 진행한다.
